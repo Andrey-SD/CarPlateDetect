@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ALPR Web to COM Controller</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; display: flex; justify-content: center; }
+    .container { width: 100%; max-width: 480px; background: #1e293b; border-radius: 20px; padding: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+    h2 { font-size: 1.2rem; text-align: center; color: #38bdf8; margin-bottom: 16px; }
+
+    /* Відеопотік камери */
+    .video-box { position: relative; width: 100%; height: 260px; background: #000; border-radius: 12px; overflow: hidden; margin-bottom: 16px; border: 2px solid #334155; }
+    video { width: 100%; height: 100%; object-fit: cover; }
+    canvas { display: none; }
+
+    /* Панель підключення COM */
+    .com-status { display: flex; justify-content: space-between; align-items: center; background: #0f172a; padding: 10px 14px; border-radius: 10px; margin-bottom: 16px; border: 1px solid #334155; }
+    .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #ef4444; display: inline-block; margin-right: 6px; }
+    .status-dot.active { background: #22c55e; }
+
+    /* Інформаційна картка */
+    .result-card { background: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 16px; text-align: center; margin-bottom: 16px; }
+    .result-title { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; }
+    .plate-number { font-size: 2rem; font-weight: 800; color: #38bdf8; letter-spacing: 2px; margin: 6px 0; }
+    .log-text { font-size: 0.85rem; color: #4ade80; min-height: 20px; }
+
+    /* Кнопки */
+    button { width: 100%; padding: 12px; border-radius: 10px; border: none; font-weight: 600; cursor: pointer; transition: 0.2s; margin-bottom: 10px; }
+    .btn-connect { background: #0284c7; color: white; }
+    .btn-scan { background: #22c55e; color: white; font-size: 1rem; }
+    .btn-auto { background: #334155; color: #f8fafc; }
+    .btn-auto.active { background: #eab308; color: #0f172a; }
+    button:active { transform: scale(0.98); }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h2>Сканер номерів (Web → COM → ESP32)</h2>
+
+    <!-- COM-порт статус -->
+    <div class="com-status">
+      <div>
+        <span class="status-dot" id="comDot"></span>
+        <span id="comText" style="font-size: 0.85rem; color: #94a3b8;">COM-порт відключено</span>
+      </div>
+      <button class="btn-connect" style="width: auto; padding: 6px 12px; margin: 0;" onclick="connectCOM()">Підключити ESP32</button>
+    </div>
+
+    <!-- Відео з веб-камери -->
+    <div class="video-box">
+      <video id="webcam" autoplay playsinline></video>
+    </div>
+    <canvas id="canvas"></canvas>
+
+    <!-- Результат -->
+    <div class="result-card">
+      <div class="result-title">Останній розпізнаний номер</div>
+      <div class="plate-number" id="plateDisplay">---</div>
+      <div class="log-text" id="logText">Готово до роботи</div>
+    </div>
+
+    <!-- Управління -->
+    <button class="btn-scan" onclick="captureAndRecognize()">Розпізнати номер зараз</button>
+    <button class="btn-auto" id="autoBtn" onclick="toggleAutoScan()">Автосканування: ВИМК</button>
+  </div>
+
+  <script>
+    const API_TOKEN = "8bc1be8f4055c78aed5fb5e3b678e61a306cc305"; // Вкажіть свій токен
+    let port, writer;
+    let autoInterval = null;
+
+    // 1. Ініціалізація веб-камери
+    async function initCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        document.getElementById('webcam').srcObject = stream;
+      } catch (err) {
+        alert("Помилка доступу до веб-камери: " + err.message);
+      }
+    }
+
+    // 2. Підключення до COM-порту ESP32 (Web Serial API)
+    // 2. Підключення до COM-порту Arduino (Web Serial API)
+    async function connectCOM() {
+      if (!("serial" in navigator)) {
+        alert("Ваш браузер не підтримує Web Serial API. Використовуйте Chrome або Edge.");
+        return;
+      }
+      try {
+        port = await navigator.serial.requestPort();
+        // ВАЖЛИВО: ставимо 9600 для Arduino Uno
+        await port.open({ baudRate: 9600 });
+        
+        const textEncoder = new TextEncoderStream();
+        textEncoder.readable.pipeTo(port.writable);
+        writer = textEncoder.writable.getWriter();
+
+        document.getElementById('comDot').classList.add('active');
+        document.getElementById('comText').innerText = "Arduino підключено";
+        document.getElementById('comText').style.color = "#4ade80";
+      } catch (err) {
+        console.error("Помилка COM-порту:", err);
+      }
+    }
+
+    // 3. Відправка даних у COM-порт (ОБОВ'ЯЗКОВО З ПРЕФІКСОМ PLATE:)
+    async function sendToESP32(plate) {
+      if (writer) {
+        // Додаємо "PLATE:" на початку, щоб Arduino розпізнала команду
+        await writer.write(`PLATE:${plate}\n`);
+        document.getElementById('logText').innerText = `Передано в COM: PLATE:${plate}`;
+      } else {
+        document.getElementById('logText').innerText = `Номер розпізнано, але COM-порт не підключено!`;
+      }
+    }
+
+    // 4. Захоплення кадру та відправка на Plate Recognizer API
+    async function captureAndRecognize() {
+      const video = document.getElementById('webcam');
+      const canvas = document.getElementById('canvas');
+      const logText = document.getElementById('logText');
+
+      if (!video.videoWidth) {
+        logText.innerText = "Камера не готова";
+        return;
+      }
+
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      logText.innerText = "Розпізнавання...";
+
+      // Конвертуємо кадр у Blob (JPEG)
+      canvas.toBlob(async (blob) => {
+        const formData = new FormData();
+        formData.append('upload', blob, 'frame.jpg');
+
+        try {
+          const response = await fetch('https://api.platerecognizer.com/v1/plate-reader/', {
+            method: 'POST',
+            headers: {
+              'Authorization': 'Token ' + API_TOKEN
+            },
+            body: formData
+          });
+
+          const data = await response.json();
+
+          if (data.results && data.results.length > 0) {
+            const recognizedPlate = data.results[0].plate.toUpperCase();
+            document.getElementById('plateDisplay').innerText = recognizedPlate;
+            sendToESP32(recognizedPlate);
+          } else {
+            document.getElementById('plateDisplay').innerText = "---";
+            logText.innerText = "Номер не знайдено на кадрі";
+          }
+        } catch (err) {
+          logText.innerText = "Помилка API запиту";
+          console.error(err);
+        }
+      }, 'image/jpeg', 0.8);
+    }
+
+    // 5. Автосканування кожні 3 секунди
+    function toggleAutoScan() {
+      const btn = document.getElementById('autoBtn');
+      if (autoInterval) {
+        clearInterval(autoInterval);
+        autoInterval = null;
+        btn.innerText = "Автосканування: ВИМК";
+        btn.classList.remove('active');
+      } else {
+        autoInterval = setInterval(captureAndRecognize, 3000);
+        btn.innerText = "Автосканування: УВІМК (3с)";
+        btn.classList.add('active');
+      }
+    }
+
+    // Запуск камери при завантаженні
+    initCamera();
+  </script>
+</body>
+</html>
